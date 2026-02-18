@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PGBastion Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>PGBastion</h1>
+        <div id="status-indicator" class="status-indicator"></div>
+    </header>
+
+    <main>
+        <section id="cluster-section" class="section">
+            <h2>Cluster Topology</h2>
+            <div id="topology" class="topology">
+                <svg id="topology-svg" width="100%" height="200"></svg>
+            </div>
+            <div id="cluster-actions" class="cluster-actions">
+                <button id="btn-switchover" class="action-btn switchover" disabled>Switchover</button>
+                <button id="btn-failover" class="action-btn failover" disabled>Failover</button>
+            </div>
+        </section>
+
+        <div id="action-modal" class="modal hidden">
+            <div class="modal-content">
+                <h3 id="modal-title">Confirm Action</h3>
+                <p id="modal-message">Are you sure?</p>
+                <div class="modal-form">
+                    <label for="target-node">Target Node:</label>
+                    <select id="target-node"></select>
+                </div>
+                <div class="modal-form">
+                    <label for="auth-token">Auth Token:</label>
+                    <input type="password" id="auth-token" placeholder="Enter auth token">
+                </div>
+                <div class="modal-buttons">
+                    <button id="modal-cancel" class="action-btn">Cancel</button>
+                    <button id="modal-confirm" class="action-btn confirm">Confirm</button>
+                </div>
+                <div id="modal-status" class="modal-status"></div>
+            </div>
+        </div>
+
+        <section id="nodes-section" class="section">
+            <h2>Node Status</h2>
+            <div id="nodes" class="nodes-grid"></div>
+        </section>
+
+        <section id="connections-section" class="section">
+            <h2>Connections</h2>
+            <div class="connections-info">
+                <div class="connection-stat">
+                    <span class="stat-label">Active</span>
+                    <span id="active-connections" class="stat-value">0</span>
+                </div>
+                <div id="connections-by-backend" class="connections-by-backend"></div>
+            </div>
+        </section>
+
+        <section id="raft-section" class="section">
+            <h2>Raft Consensus</h2>
+            <div class="raft-info">
+                <div class="raft-stat">
+                    <span class="stat-label">State</span>
+                    <span id="raft-state" class="stat-value">-</span>
+                </div>
+                <div class="raft-stat">
+                    <span class="stat-label">Term</span>
+                    <span id="raft-term" class="stat-value">-</span>
+                </div>
+                <div class="raft-stat">
+                    <span class="stat-label">Leader</span>
+                    <span id="raft-leader" class="stat-value">-</span>
+                </div>
+                <div class="raft-stat">
+                    <span class="stat-label">Peers</span>
+                    <span id="raft-peers" class="stat-value">-</span>
+                </div>
+            </div>
+        </section>
+
+        <section id="health-section" class="section">
+            <h2>Health History</h2>
+            <div id="health-history" class="health-history">
+                <div class="health-timeline"></div>
+            </div>
+            <div class="health-stats">
+                <span id="health-success-rate" class="health-stat"></span>
+                <span id="health-avg-duration" class="health-stat"></span>
+            </div>
+        </section>
+
+        <section id="replication-section" class="section">
+            <h2>Replication</h2>
+            <div id="replication-info" class="replication-info">
+                <div class="replication-stat">
+                    <span class="stat-label">Lag</span>
+                    <span id="replication-lag" class="stat-value">-</span>
+                </div>
+                <div id="replicas-list" class="replicas-list"></div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <span id="last-updated">Last updated: -</span>
+        <span id="refresh-status">Auto-refresh: ON</span>
+    </footer>
+
+    <script src="app.js"></script>
+</body>
+</html>

@@ -2,8 +2,6 @@
 
 Standalone PostgreSQL HA daemon replacing Patroni + etcd + HAProxy + Keepalived.
 
----
-
 ## Overview
 
 | Component | Replaces | Package |
@@ -13,102 +11,21 @@ Standalone PostgreSQL HA daemon replacing Patroni + etcd + HAProxy + Keepalived.
 | Consensus | etcd | `internal/consensus/` |
 | Cluster Manager | Patroni | `internal/cluster/` |
 
----
-
 ## Repository Structure
 
 ```
 cmd/pgbastion/main.go     # CLI + daemon orchestration
 internal/
-  api/                    # REST API + Prometheus /metrics
+  api/                    # REST API + Prometheus /metrics + embedded UI
   cluster/                # Health checks, failover, replication
   config/                 # YAML loading, validation, hot-reload
   consensus/              # Raft FSM, store, directives
-  proxy/                  # TCP proxy, routing, connection tracking
+  proxy/                  # TCP proxy, routing, connection pooling
+  testutil/               # Chaos testing utilities
+  tracing/                # OpenTelemetry distributed tracing
   vip/                    # VIP management via netlink
-test/e2e/                 # Docker-based E2E tests (15 tests)
+test/e2e/                 # Docker-based E2E tests
 ```
-
----
-
-## Configuration
-
-Default: `/etc/pgbastion/pgbastion.yaml`
-
-```yaml
-node:
-  name: node1
-  address: 10.0.1.1
-
-raft:
-  data_dir: /var/lib/pgbastion/raft
-  bind_port: 8300
-  bootstrap: false  # true only for first node
-  log_level: WARN   # DEBUG, INFO, WARN, ERROR
-  snapshot_retain: 2
-  transport_timeout: 10s
-  heartbeat_timeout: 1s
-  election_timeout: 1s
-
-proxy:
-  primary_port: 5432
-  replica_port: 5433
-  drain_timeout: 30s
-
-vip:
-  address: 10.0.1.100
-  interface: eth0
-
-postgresql:  # enables cluster management
-  bin_dir: /usr/lib/postgresql/16/bin
-  data_dir: /var/lib/postgresql/16/main
-  connect_dsn: "host=/var/run/postgresql dbname=postgres"
-  health_interval: 2s
-  health_max_backoff: 30s
-  health_backoff_multiplier: 2.0
-
-api:
-  port: 8080
-  bind_address: 127.0.0.1  # default, use 0.0.0.0 for all interfaces
-  auth_token: "your-secret-token"  # required for mutation endpoints
-
-metrics:
-  port: 9090
-
-log:
-  level: info
-```
-
----
-
-## Network Ports
-
-| Port | Purpose |
-|------|---------|
-| 5432 | Primary proxy (writes) |
-| 5433 | Replica proxy (reads) |
-| 8080 | REST API |
-| 9090 | Prometheus metrics |
-| 8300 | Raft consensus |
-| 7946 | Memberlist discovery |
-
----
-
-## Key REST API Endpoints
-
-| Endpoint | Method | Auth Required | Description |
-|----------|--------|---------------|-------------|
-| `/health` | GET | No | Node health status |
-| `/cluster` | GET | No | Routing table |
-| `/primary` | GET | No | 200 if primary (HAProxy compat) |
-| `/replica` | GET | No | 200 if replica (HAProxy compat) |
-| `/raft/state` | GET | No | Raft leader info |
-| `/cluster/failover` | POST | **Yes** | Manual failover |
-| `/cluster/switchover` | POST | **Yes** | Graceful switchover |
-| `/raft/add-peer` | POST | **Yes** | Add cluster node |
-| `/raft/remove-peer` | POST | **Yes** | Remove cluster node |
-
----
 
 ## Architecture
 
@@ -120,22 +37,13 @@ log:
 - `ClusterStateSource` — Router reads from Raft FSM
 - `LeadershipSource` — VIP uses Raft for leader election
 
----
-
 ## Build & Test
 
 ```bash
-# Build
 go build -o pgbastion ./cmd/pgbastion/
-
-# Unit tests
 go test ./internal/...
-
-# E2E tests (requires Docker)
-cd test/e2e && ./run.sh
+cd test/e2e && ./run.sh  # requires Docker
 ```
-
----
 
 ## Coding Conventions
 
@@ -144,50 +52,104 @@ cd test/e2e && ./run.sh
 - **Concurrency:** Channels for signals, mutexes for shared state
 - **Imports:** stdlib → external → internal (blank line separated)
 
----
+## Configuration
 
-## Production Readiness Checklist
+Default: `/etc/pgbastion/pgbastion.yaml` — See `internal/config/config.go` for full schema.
 
-### Sprint 1: Security (CRITICAL) — COMPLETE
-- [x] **API Authentication** — Bearer token auth for mutation endpoints
-- [x] **API Bind Address** — Config option to bind to specific interface (default 127.0.0.1)
-- [x] **Command Validation** — Validate postgresql.bin_dir paths (absolute, no shell chars)
+| Port | Purpose |
+|------|---------|
+| 5432 | Primary proxy (writes) |
+| 5433 | Replica proxy (reads) |
+| 8080 | REST API |
+| 9090 | Prometheus metrics |
+| 8300 | Raft consensus |
 
-### Sprint 2: Stability — COMPLETE
-- [x] Health check exponential backoff on failures
-- [x] Configurable Raft parameters (timeouts, snapshot retention)
-- [x] Bounded timeout on VIP resign during shutdown
-- [x] Request correlation IDs in logs (X-Request-ID header)
+### Key Settings
 
-### Sprint 3: Operations — COMPLETE
-- [x] Additional Prometheus metrics (Raft term, consensus latency, API request duration)
-- [x] Config schema versioning (`version: 1` with validation)
-- [ ] Chaos/error path test coverage (deferred)
-- [x] Operational runbooks and troubleshooting docs (OPERATIONS.md)
+- `failover.fencing_enabled` — Defaults to `true`. Publishes FENCE directive to old primary before PROMOTE.
+- `proxy.pool.enabled` — Enable connection pooling for backend connections.
+- `raft.tls_enabled` — Enable TLS for Raft transport.
+- `raft.tls_cert`, `raft.tls_key`, `raft.tls_ca` — TLS certificate paths (CA enables mTLS).
+- `failover.split_brain_protection` — Defaults to `true`. Primary self-fences when quorum is lost.
+- `failover.quorum_loss_timeout` — Time without quorum before self-fencing (default 30s).
 
-### Future
-- [ ] Web UI dashboard
-- [ ] Alert integrations (Slack, PagerDuty)
-- [ ] Connection pooling
-- [ ] Distributed tracing
+### Operational Endpoints
 
----
+- `GET /directives` — List all directives (alias for `/raft/directives`)
+- `GET /members` — Raft cluster members (alias for `/raft/peers`)
+- `GET /nodes` — All PostgreSQL nodes with health/lag data
+- `GET /cluster/postgresql` — Current cluster-wide PostgreSQL config
+- `PATCH /cluster/postgresql` — Update PostgreSQL parameters (requires auth)
+- `DELETE /cluster/postgresql?name=param` — Reset a parameter (requires auth)
 
-## Recent Changes
+### Cluster-Wide PostgreSQL Configuration
 
-**2026-02-15:**
-- **Sprint 3 Operations Complete:**
-  - Prometheus metrics: `pgbastion_raft_state`, `pgbastion_raft_term`, `pgbastion_raft_peers_count`, `pgbastion_raft_is_leader`, `pgbastion_api_request_duration_seconds`, `pgbastion_api_requests_total`
-  - Config schema versioning (`version: 1` field with validation for forward/backward compatibility)
-  - Created `OPERATIONS.md` with cluster bootstrap, node management, failover/switchover procedures, disaster recovery, troubleshooting, and monitoring guidance
-- **Sprint 2 Stability Complete:**
-  - Health check exponential backoff (`postgresql.health_interval`, `health_max_backoff`, `health_backoff_multiplier`)
-  - Configurable Raft parameters (`raft.log_level`, `snapshot_retain`, `transport_timeout`, `heartbeat_timeout`, `election_timeout`)
-  - Bounded 5s timeout on VIP resign during shutdown (prevents hanging)
-  - Request correlation IDs (`X-Request-ID` header, `request_id` in all logs)
-- **Sprint 1 Security Complete:**
-  - Bearer token authentication for mutation endpoints (`api.auth_token`)
-  - Configurable API bind address (`api.bind_address`, defaults to 127.0.0.1)
-  - Path validation for `postgresql.bin_dir` and `postgresql.data_dir`
-- Fixed e2e tests, double WriteHeader, pre-initialized metrics
-- All 15 e2e tests passing
+Similar to Patroni, PGBastion manages PostgreSQL configuration via Raft consensus:
+
+1. **API writes** go through Raft leader → FSM stores config with version
+2. **ConfigWatcher** on each node polls FSM every 10s for config changes
+3. **ConfigApplier** applies via `ALTER SYSTEM SET`, then `pg_reload_conf()`
+4. Parameters requiring restart (context=postmaster) are tracked as `pending_restart`
+
+Example:
+```bash
+# Set parameters
+curl -X PATCH http://localhost:8080/cluster/postgresql \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"parameters": {"max_connections": "200", "shared_buffers": "1GB"}}'
+
+# View config
+curl http://localhost:8080/cluster/postgresql
+
+# Reset a parameter
+curl -X DELETE "http://localhost:8080/cluster/postgresql?name=max_connections" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+## Remaining Work
+
+### Future Enhancements
+
+- [ ] **Alert Integrations** — Slack, PagerDuty webhooks on state transitions (if needed)
+
+## Completed
+
+### Core Functionality
+- Directive execution via `Manager.processDirectives()` — polls FSM, executes pg_ctl locally
+- Fencing enabled by default — FENCE directive stops old primary before PROMOTE
+- Directive timeout (60s) via `FailoverController.MonitorDirectives()`
+- Connection pooling integrated into proxy — uses `PoolManager` when `pool.enabled=true`
+- Graceful switchover with sync — waits for replica to catch up before demote/promote
+- **Cluster-wide PostgreSQL config** — Patroni-style config via Raft FSM (`/cluster/postgresql` API)
+
+### Security & Stability
+- Bearer token auth for mutation endpoints
+- API bind address config (default 127.0.0.1)
+- Path validation for postgresql.bin_dir/data_dir
+- Health check exponential backoff
+- Configurable Raft parameters
+- VIP resign timeout (5s)
+- Request correlation IDs
+- **Raft mTLS support** — `raft.tls_enabled` with optional CA for mutual TLS
+- **Split-brain protection** — Primary self-fences when quorum lost for `quorum_loss_timeout` (default 30s)
+
+### Observability
+- Prometheus metrics (31 total)
+- OpenTelemetry tracing
+- Web UI dashboard at `/ui/` with failover/switchover action buttons
+- Server-Sent Events at `/events` for real-time updates
+- Operational API endpoints (`/directives`, `/members`, `/nodes`)
+
+### Testing
+- Comprehensive chaos tests in `internal/cluster/manager_chaos_test.go`
+- Tests cover: directive execution (FENCE, PROMOTE, DEMOTE, CHECKPOINT), split-brain self-fencing, command timeouts, intermittent failures, high latency, concurrent directives, Raft backoff
+
+### Infrastructure
+- Config schema versioning
+- Periodic replication slot cleanup (hourly on primary)
+- Node health/lag data synced to FSM
+- Gratuitous ARP on VIP acquisition (updates network switch MAC tables)
+- 15 E2E tests passing
+- **Docker support** — Multi-stage Dockerfile with health checks
+- **Raft backup/restore docs** — Comprehensive backup strategy in OPERATIONS.md
+- **Upgrade documentation** — Rolling upgrade, blue-green, and rollback procedures

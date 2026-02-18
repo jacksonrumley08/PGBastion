@@ -45,11 +45,12 @@ type Proxy struct {
 	connectTimeout time.Duration
 	router         *Router
 	tracker        *ConnectionTracker
+	poolManager    *PoolManager // Optional: nil disables pooling
 	logger         *slog.Logger
 }
 
 // NewProxy creates a new TCP proxy.
-func NewProxy(primaryPort, replicaPort int, drainTimeout, connectTimeout time.Duration, router *Router, logger *slog.Logger) *Proxy {
+func NewProxy(primaryPort, replicaPort int, drainTimeout, connectTimeout time.Duration, router *Router, poolManager *PoolManager, logger *slog.Logger) *Proxy {
 	return &Proxy{
 		primaryPort:    primaryPort,
 		replicaPort:    replicaPort,
@@ -57,6 +58,7 @@ func NewProxy(primaryPort, replicaPort int, drainTimeout, connectTimeout time.Du
 		connectTimeout: connectTimeout,
 		router:         router,
 		tracker:        NewConnectionTracker(logger),
+		poolManager:    poolManager,
 		logger:         logger.With("component", "proxy"),
 	}
 }
@@ -69,6 +71,11 @@ func (p *Proxy) Tracker() *ConnectionTracker {
 // Router returns the router for observability.
 func (p *Proxy) Router() *Router {
 	return p.router
+}
+
+// PoolManager returns the pool manager (may be nil if pooling is disabled).
+func (p *Proxy) PoolManager() *PoolManager {
+	return p.poolManager
 }
 
 // Run starts both primary and replica listeners. Blocks until context is cancelled.
@@ -87,6 +94,9 @@ func (p *Proxy) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		p.logger.Info("proxy shutting down, draining connections", "timeout", p.drainTimeout)
 		p.tracker.DrainAll(p.drainTimeout)
+		if p.poolManager != nil {
+			p.poolManager.DrainAll(p.drainTimeout)
+		}
 		return ctx.Err()
 	case err := <-errCh:
 		return err
@@ -145,19 +155,33 @@ func (p *Proxy) handleConn(ctx context.Context, clientConn net.Conn, portType st
 		return
 	}
 
-	backendConn, err := net.DialTimeout("tcp", backendAddr, p.connectTimeout)
-	if err == nil {
-		// Enable TCP keepalive on the backend connection to detect dead peers.
-		if tc, ok := backendConn.(*net.TCPConn); ok {
-			tc.SetKeepAlive(true)
-			tc.SetKeepAlivePeriod(30 * time.Second)
+	var backendConn net.Conn
+	var err error
+	usePool := p.poolManager != nil && p.poolManager.IsEnabled()
+
+	if usePool {
+		// Use connection pool for backend connection.
+		connCtx, connCancel := context.WithTimeout(ctx, p.connectTimeout)
+		backendConn, err = p.poolManager.Acquire(connCtx, backendAddr)
+		connCancel()
+	} else {
+		// Direct connection without pooling.
+		backendConn, err = net.DialTimeout("tcp", backendAddr, p.connectTimeout)
+		if err == nil {
+			// Enable TCP keepalive on the backend connection to detect dead peers.
+			if tc, ok := backendConn.(*net.TCPConn); ok {
+				tc.SetKeepAlive(true)
+				tc.SetKeepAlivePeriod(30 * time.Second)
+			}
 		}
 	}
+
 	if err != nil {
 		p.logger.Error("failed to connect to backend",
 			"backend", backendAddr,
 			"error", err,
 			"type", portType,
+			"pooled", usePool,
 		)
 		proxyRoutingErrors.WithLabelValues(portType, "backend_connect_failed").Inc()
 		clientConn.Close()
@@ -174,6 +198,7 @@ func (p *Proxy) handleConn(ctx context.Context, clientConn net.Conn, portType st
 		"client", clientConn.RemoteAddr(),
 		"backend", backendAddr,
 		"type", portType,
+		"pooled", usePool,
 	)
 
 	stats := &ConnStats{
@@ -195,7 +220,16 @@ func (p *Proxy) handleConn(ctx context.Context, clientConn net.Conn, portType st
 	}
 
 	clientConn.Close()
-	backendConn.Close()
+
+	// For pooled connections, discard rather than release since we can't
+	// guarantee the connection state after client disconnect (no protocol-level reset).
+	// This still benefits from pool features: pre-warming, connection limits, metrics.
+	if usePool {
+		p.poolManager.Discard(backendAddr, backendConn)
+	} else {
+		backendConn.Close()
+	}
+
 	p.tracker.Remove(id)
 	cancel()
 

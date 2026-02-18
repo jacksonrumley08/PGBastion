@@ -77,6 +77,11 @@ type PGConn interface {
 // pgxConnector is the real PGConnector using pgx.
 type pgxConnector struct{}
 
+// NewPgxConnector returns a PGConnector that uses pgx for real PostgreSQL connections.
+func NewPgxConnector() PGConnector {
+	return &pgxConnector{}
+}
+
 func (c *pgxConnector) Connect(ctx context.Context, dsn string) (PGConn, error) {
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {

@@ -109,6 +109,7 @@ type handlers struct {
 	healthChecker   *cluster.HealthChecker
 	replication     *cluster.ReplicationManager
 	progressTracker *cluster.ProgressTracker
+	configApplier   *cluster.ConfigApplier
 	nodeName        string
 }
 
@@ -556,6 +557,41 @@ func (h *handlers) clusterProgress(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// nodes returns all nodes from the FSM with their health data.
+func (h *handlers) nodes(w http.ResponseWriter, r *http.Request) {
+	if h.raftStore == nil {
+		http.Error(w, "raft not configured", http.StatusNotFound)
+		return
+	}
+
+	allNodes := h.raftStore.FSM().GetAllNodes()
+
+	type nodeInfo struct {
+		Name     string `json:"name"`
+		Host     string `json:"host"`
+		Port     int    `json:"port"`
+		Role     string `json:"role"`
+		State    string `json:"state"`
+		Lag      int64  `json:"lag_bytes"`
+		LastSeen string `json:"last_seen"`
+	}
+
+	var result []nodeInfo
+	for _, n := range allNodes {
+		result = append(result, nodeInfo{
+			Name:     n.Name,
+			Host:     n.Host,
+			Port:     n.Port,
+			Role:     n.Role,
+			State:    n.State,
+			Lag:      n.Lag,
+			LastSeen: n.LastSeen.Format(time.RFC3339),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"nodes": result})
+}
+
 // raftDirectives returns all directives, optionally filtered by node and/or status.
 func (h *handlers) raftDirectives(w http.ResponseWriter, r *http.Request) {
 	if h.raftStore == nil {
@@ -902,4 +938,265 @@ func (h *handlers) patroniConfig(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) patroniHistory(w http.ResponseWriter, r *http.Request) {
 	// Return empty history - full implementation would require tracking failover events.
 	writeJSON(w, http.StatusOK, []any{})
+}
+
+// events implements Server-Sent Events for real-time dashboard updates.
+func (h *handlers) events(w http.ResponseWriter, r *http.Request) {
+	// Set SSE headers.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Flush headers immediately.
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	flusher.Flush()
+
+	// Create a ticker for periodic updates.
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	// Send initial cluster state.
+	h.sendClusterUpdate(w, flusher)
+
+	// Keep connection open and send updates.
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			h.sendClusterUpdate(w, flusher)
+		}
+	}
+}
+
+// postgresqlConfigRouter routes PostgreSQL config requests by method.
+func (h *handlers) postgresqlConfigRouter(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.postgresqlConfig(w, r)
+	case http.MethodPatch, http.MethodPost:
+		h.postgresqlConfigUpdate(w, r)
+	case http.MethodDelete:
+		h.postgresqlConfigDelete(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// postgresqlConfig returns the current cluster-wide PostgreSQL configuration.
+func (h *handlers) postgresqlConfig(w http.ResponseWriter, r *http.Request) {
+	if h.raftStore == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": "Raft store not configured",
+		})
+		return
+	}
+
+	cfg := h.raftStore.GetPostgreSQLConfig()
+
+	resp := map[string]any{
+		"parameters": cfg.Parameters,
+		"version":    cfg.Version,
+		"updated_at": cfg.UpdatedAt,
+		"updated_by": cfg.UpdatedBy,
+	}
+
+	// Add pending restart info if available.
+	if h.configApplier != nil {
+		resp["pending_restart"] = h.configApplier.IsPendingRestart()
+		resp["pending_restart_params"] = h.configApplier.PendingRestartParams()
+		resp["last_applied_version"] = h.configApplier.LastAppliedVersion()
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// postgresqlConfigUpdate updates the cluster-wide PostgreSQL configuration.
+func (h *handlers) postgresqlConfigUpdate(w http.ResponseWriter, r *http.Request) {
+	if h.raftStore == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": "Raft store not configured",
+		})
+		return
+	}
+
+	if !h.raftStore.IsLeader() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error":  "not the Raft leader",
+			"leader": h.raftStore.LeaderAddr(),
+		})
+		return
+	}
+
+	var req struct {
+		Parameters map[string]string `json:"parameters"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid JSON: " + err.Error(),
+		})
+		return
+	}
+
+	if len(req.Parameters) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "no parameters provided",
+		})
+		return
+	}
+
+	// Patch the config (merge with existing).
+	if err := h.raftStore.PatchPostgreSQLConfig(req.Parameters, h.nodeName); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to update config: " + err.Error(),
+		})
+		return
+	}
+
+	cfg := h.raftStore.GetPostgreSQLConfig()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message":    "configuration updated",
+		"version":    cfg.Version,
+		"parameters": cfg.Parameters,
+	})
+}
+
+// postgresqlConfigDelete removes parameters from the cluster-wide configuration.
+func (h *handlers) postgresqlConfigDelete(w http.ResponseWriter, r *http.Request) {
+	if h.raftStore == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": "Raft store not configured",
+		})
+		return
+	}
+
+	if !h.raftStore.IsLeader() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error":  "not the Raft leader",
+			"leader": h.raftStore.LeaderAddr(),
+		})
+		return
+	}
+
+	var req struct {
+		Parameters []string `json:"parameters"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid JSON: " + err.Error(),
+		})
+		return
+	}
+
+	if len(req.Parameters) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "no parameters specified for deletion",
+		})
+		return
+	}
+
+	// Delete by patching with empty values.
+	deletes := make(map[string]string)
+	for _, name := range req.Parameters {
+		deletes[name] = ""
+	}
+
+	if err := h.raftStore.PatchPostgreSQLConfig(deletes, h.nodeName); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to delete parameters: " + err.Error(),
+		})
+		return
+	}
+
+	cfg := h.raftStore.GetPostgreSQLConfig()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message":    "parameters removed",
+		"version":    cfg.Version,
+		"deleted":    req.Parameters,
+		"parameters": cfg.Parameters,
+	})
+}
+
+// sendClusterUpdate sends current cluster state as an SSE event.
+func (h *handlers) sendClusterUpdate(w http.ResponseWriter, flusher http.Flusher) {
+	event := map[string]any{
+		"type":      "cluster_update",
+		"timestamp": time.Now().Format(time.RFC3339),
+	}
+
+	// Add cluster routing info.
+	if h.stateSource != nil {
+		primary := h.stateSource.GetPrimary()
+		replicas := h.stateSource.GetReplicas()
+
+		routingTable := map[string]any{
+			"split_brain": h.stateSource.IsSplitBrain(),
+		}
+		if primary != nil {
+			routingTable["primary"] = fmt.Sprintf("%s:%d", primary.Host, primary.Port)
+		}
+		replicaAddrs := make([]string, 0, len(replicas))
+		for _, r := range replicas {
+			replicaAddrs = append(replicaAddrs, fmt.Sprintf("%s:%d", r.Host, r.Port))
+		}
+		routingTable["replicas"] = replicaAddrs
+
+		event["cluster"] = map[string]any{
+			"routing_table": routingTable,
+		}
+	}
+
+	// Add Raft state.
+	if h.raftStore != nil {
+		event["raft"] = map[string]any{
+			"state":     h.raftStore.RaftState(),
+			"leader":    h.raftStore.LeaderAddr(),
+			"is_leader": h.raftStore.IsLeader(),
+		}
+	}
+
+	// Add health info.
+	if h.healthChecker != nil {
+		status := h.healthChecker.Status()
+		event["health"] = map[string]any{
+			"healthy":       status.Healthy,
+			"is_in_recovery": status.IsInRecovery,
+			"lag":           status.ReplicationLag,
+		}
+	}
+
+	// Add cluster state from FSM.
+	if h.raftStore != nil {
+		fsm := h.raftStore.FSM()
+		if fsm != nil {
+			nodes := make(map[string]any)
+			for name, node := range fsm.GetAllNodes() {
+				nodes[name] = map[string]any{
+					"role":      node.Role,
+					"state":     node.State,
+					"lag":       node.Lag,
+					"last_seen": node.LastSeen,
+				}
+			}
+			event["cluster_state"] = map[string]any{
+				"nodes": nodes,
+			}
+		}
+	}
+
+	// Serialize and send.
+	data, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+
+	fmt.Fprintf(w, "data: %s\n\n", data)
+	flusher.Flush()
 }

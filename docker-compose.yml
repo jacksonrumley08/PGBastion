@@ -1,0 +1,58 @@
+# PGBastion Docker Compose - Development/Testing
+#
+# For production, use Kubernetes with the Helm chart or deploy directly on VMs.
+# This compose file is for local development and testing.
+#
+# Usage:
+#   docker compose up -d
+#   docker compose logs -f pgbastion
+#   curl http://localhost:8080/health
+
+version: "3.8"
+
+services:
+  pgbastion:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-local}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    image: pgbastion:${VERSION:-dev}
+    container_name: pgbastion
+
+    # Required for VIP management
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    # Use host network for VIP to work properly
+    # network_mode: host
+
+    ports:
+      - "5432:5432"   # Primary proxy
+      - "5433:5433"   # Replica proxy
+      - "8080:8080"   # REST API
+      - "9090:9090"   # Prometheus metrics
+      - "8300:8300"   # Raft consensus
+      - "7946:7946"   # Memberlist
+
+    volumes:
+      - ./config/pgbastion.yaml.example:/etc/pgbastion/pgbastion.yaml:ro
+      - pgbastion-data:/var/lib/pgbastion
+
+    environment:
+      - PGBASTION_CONFIG=/etc/pgbastion/pgbastion.yaml
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+    restart: unless-stopped
+
+volumes:
+  pgbastion-data:
+    driver: local

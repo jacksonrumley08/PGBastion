@@ -15,6 +15,7 @@ func testLogger() *slog.Logger {
 }
 
 func testConfig() *config.Config {
+	fencingEnabled := true
 	return &config.Config{
 		Node: config.NodeConfig{Name: "node1", Address: "10.0.1.1"},
 		PostgreSQL: config.PostgreSQLConfig{
@@ -26,7 +27,7 @@ func testConfig() *config.Config {
 		},
 		Failover: config.FailoverConfig{
 			ConfirmationPeriod: 5 * time.Second,
-			FencingEnabled:     true,
+			FencingEnabled:     &fencingEnabled,
 		},
 	}
 }

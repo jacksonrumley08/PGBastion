@@ -49,6 +49,13 @@ func (e *realExecutor) Run(ctx context.Context, name string, args ...string) ([]
 // DefaultDirectiveTimeout is the default timeout for directive completion.
 const DefaultDirectiveTimeout = 60 * time.Second
 
+// DefaultSwitchoverSyncTimeout is the timeout for waiting for replica to sync during switchover.
+const DefaultSwitchoverSyncTimeout = 30 * time.Second
+
+// SwitchoverMaxLagBytes is the maximum acceptable lag (in bytes) for switchover to proceed.
+// A value of 0 means replica must be fully caught up.
+const SwitchoverMaxLagBytes = 0
+
 // FailoverController manages failover and switchover operations.
 // In the agent-based model, it publishes directives to the Raft FSM
 // rather than executing pg_ctl commands directly.
@@ -79,7 +86,7 @@ func (f *FailoverController) UpdateConfig(cfg *config.Config) {
 	f.cfgMu.Unlock()
 	f.logger.Info("failover configuration updated",
 		"confirmation_period", cfg.Failover.ConfirmationPeriod,
-		"fencing_enabled", cfg.Failover.FencingEnabled,
+		"fencing_enabled", cfg.Failover.IsFencingEnabled(),
 	)
 }
 
@@ -194,7 +201,7 @@ func (f *FailoverController) publishFailoverDirectives(failedPrimary, targetNode
 
 	// Step 1: Publish FENCE directive for the failed primary (if fencing is enabled).
 	cfg := f.getConfig()
-	if cfg.Failover.FencingEnabled {
+	if cfg.Failover.IsFencingEnabled() {
 		fenceID := fmt.Sprintf("fence-%s-%d", failedPrimary, now.UnixNano())
 		fenceDirective := consensus.Directive{
 			ID:         fenceID,
@@ -260,8 +267,11 @@ func (f *FailoverController) publishFailoverDirectives(failedPrimary, targetNode
 	return nil
 }
 
-// ExecuteSwitchover publishes directives for a graceful switchover:
-// CHECKPOINT + DEMOTE on current primary, PROMOTE on target.
+// ExecuteSwitchover performs a graceful switchover with replication sync:
+// 1. CHECKPOINT on current primary (flush WAL)
+// 2. Wait for target replica to catch up
+// 3. DEMOTE on current primary
+// 4. PROMOTE on target
 func (f *FailoverController) ExecuteSwitchover(ctx context.Context, currentPrimary, targetNode string) error {
 	if f.store == nil {
 		return fmt.Errorf("no consensus store available")
@@ -276,7 +286,7 @@ func (f *FailoverController) ExecuteSwitchover(ctx context.Context, currentPrima
 	now := time.Now()
 	var directiveIDs []string
 
-	// Step 1: CHECKPOINT on current primary.
+	// Step 1: CHECKPOINT on current primary to flush WAL.
 	checkpointID := fmt.Sprintf("checkpoint-%s-%d", currentPrimary, now.UnixNano())
 	if err := f.store.PublishDirective(consensus.Directive{
 		ID:         checkpointID,
@@ -291,7 +301,27 @@ func (f *FailoverController) ExecuteSwitchover(ctx context.Context, currentPrima
 	directivesPublished.WithLabelValues(consensus.DirectiveCheckpoint).Inc()
 	directiveIDs = append(directiveIDs, checkpointID)
 
-	// Step 2: DEMOTE on current primary.
+	f.logger.Info("waiting for CHECKPOINT to complete", "directive_id", checkpointID)
+
+	// Wait for CHECKPOINT to complete with timeout.
+	checkpointCtx, checkpointCancel := context.WithTimeout(ctx, DefaultDirectiveTimeout)
+	defer checkpointCancel()
+	if err := f.waitForDirective(checkpointCtx, checkpointID); err != nil {
+		f.clearFailover()
+		return fmt.Errorf("CHECKPOINT failed: %w", err)
+	}
+
+	// Step 2: Wait for replica to sync (lag <= 0).
+	f.logger.Info("waiting for replica to sync", "target", targetNode)
+	syncCtx, syncCancel := context.WithTimeout(ctx, DefaultSwitchoverSyncTimeout)
+	defer syncCancel()
+	if err := f.waitForReplicaSync(syncCtx, targetNode, SwitchoverMaxLagBytes); err != nil {
+		f.clearFailover()
+		return fmt.Errorf("replica sync failed: %w", err)
+	}
+
+	// Step 3: DEMOTE on current primary.
+	now = time.Now() // Refresh timestamp.
 	demoteID := fmt.Sprintf("demote-%s-%d", currentPrimary, now.UnixNano())
 	if err := f.store.PublishDirective(consensus.Directive{
 		ID:         demoteID,
@@ -307,7 +337,7 @@ func (f *FailoverController) ExecuteSwitchover(ctx context.Context, currentPrima
 	directivesPublished.WithLabelValues(consensus.DirectiveDemote).Inc()
 	directiveIDs = append(directiveIDs, demoteID)
 
-	// Step 3: PROMOTE on target.
+	// Step 4: PROMOTE on target.
 	promoteID := fmt.Sprintf("promote-%s-%d", targetNode, now.UnixNano())
 	if err := f.store.PublishDirective(consensus.Directive{
 		ID:         promoteID,
@@ -427,6 +457,70 @@ func (f *FailoverController) clearFailover() {
 	f.failoverStartTime = time.Time{}
 	f.confirmationStart = time.Time{}
 	f.mu.Unlock()
+}
+
+// waitForDirective waits for a directive to complete or fail.
+func (f *FailoverController) waitForDirective(ctx context.Context, directiveID string) error {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			d := f.store.GetDirective(directiveID)
+			if d == nil {
+				return fmt.Errorf("directive %s not found", directiveID)
+			}
+			switch d.Status {
+			case consensus.DirectiveStatusCompleted:
+				return nil
+			case consensus.DirectiveStatusFailed:
+				return fmt.Errorf("directive failed: %s", d.Error)
+			}
+			// Still pending, continue waiting.
+		}
+	}
+}
+
+// waitForReplicaSync waits for a replica to catch up to acceptable lag.
+func (f *FailoverController) waitForReplicaSync(ctx context.Context, replicaName string, maxLag int64) error {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	f.logger.Info("waiting for replica to sync",
+		"replica", replicaName,
+		"max_lag_bytes", maxLag,
+	)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			nodes := f.store.FSM().GetAllNodes()
+			replica, ok := nodes[replicaName]
+			if !ok {
+				f.logger.Warn("replica not found in FSM, continuing to wait", "replica", replicaName)
+				continue
+			}
+
+			if replica.Lag <= maxLag {
+				f.logger.Info("replica synced",
+					"replica", replicaName,
+					"lag_bytes", replica.Lag,
+				)
+				return nil
+			}
+
+			f.logger.Debug("replica still catching up",
+				"replica", replicaName,
+				"lag_bytes", replica.Lag,
+				"max_lag_bytes", maxLag,
+			)
+		}
+	}
 }
 
 func (f *FailoverController) selectBestReplica(excludeName string) (*consensus.NodeInfo, error) {

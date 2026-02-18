@@ -137,6 +137,38 @@ func (s *Store) CompleteDirective(id string, errMsg string) error {
 	return s.apply(FSMCommand{Type: CmdCompleteDirective, Data: data}, 5*time.Second)
 }
 
+// SetPostgreSQLConfig sets the cluster-wide PostgreSQL configuration (full replace).
+func (s *Store) SetPostgreSQLConfig(cfg PostgreSQLConfig) error {
+	data, err := marshalData(cfg)
+	if err != nil {
+		return err
+	}
+	return s.apply(FSMCommand{Type: CmdSetPostgreSQLConfig, Data: data}, 5*time.Second)
+}
+
+// PatchPostgreSQLConfig updates specific PostgreSQL parameters (merge).
+// Empty values in the map will delete the parameter.
+func (s *Store) PatchPostgreSQLConfig(params map[string]string, updatedBy string) error {
+	data, err := marshalData(struct {
+		Parameters map[string]string `json:"parameters"`
+		UpdatedBy  string            `json:"updated_by,omitempty"`
+	}{Parameters: params, UpdatedBy: updatedBy})
+	if err != nil {
+		return err
+	}
+	return s.apply(FSMCommand{Type: CmdPatchPostgreSQLConfig, Data: data}, 5*time.Second)
+}
+
+// GetPostgreSQLConfig returns the current PostgreSQL configuration from FSM.
+func (s *Store) GetPostgreSQLConfig() PostgreSQLConfig {
+	return s.fsm.GetPostgreSQLConfig()
+}
+
+// GetPostgreSQLConfigVersion returns the current PostgreSQL config version.
+func (s *Store) GetPostgreSQLConfigVersion() int64 {
+	return s.fsm.GetPostgreSQLConfigVersion()
+}
+
 // CleanupDirectives removes completed/failed directives older than maxAge.
 // Returns the number of directives cleaned up.
 func (s *Store) CleanupDirectives(maxAge time.Duration) (int, error) {
@@ -242,6 +274,42 @@ func (s *Store) FSM() *ClusterFSM {
 // RaftState returns the current Raft state (leader, follower, candidate).
 func (s *Store) RaftState() string {
 	return s.raft.State().String()
+}
+
+// LastContact returns the time since last contact with the leader.
+// Returns 0 if this node is the leader or if we've never contacted a leader.
+func (s *Store) LastContact() time.Duration {
+	stats := s.raft.Stats()
+	lastContact := stats["last_contact"]
+	if lastContact == "" || lastContact == "never" || lastContact == "0" {
+		return 0
+	}
+	d, err := time.ParseDuration(lastContact)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// HasQuorum returns true if this node believes it has quorum.
+// For leaders, this is always true (they wouldn't be leader otherwise).
+// For followers, we check if we've heard from a leader recently.
+func (s *Store) HasQuorum(timeout time.Duration) bool {
+	state := s.raft.State()
+	if state == raft.Leader {
+		return true
+	}
+
+	// For followers/candidates, check when we last heard from a leader.
+	lastContact := s.LastContact()
+	if lastContact == 0 {
+		// Never contacted leader - might be bootstrapping or isolated.
+		// Check if there's a known leader.
+		leaderAddr, _ := s.raft.LeaderWithID()
+		return leaderAddr != ""
+	}
+
+	return lastContact < timeout
 }
 
 // RaftStateAdapter adapts the Store to satisfy the proxy's ClusterStateSource interface.

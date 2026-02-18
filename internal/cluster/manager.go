@@ -27,6 +27,9 @@ const (
 	StateFenced             NodeState = "FENCED"
 )
 
+// SlotCleanupInterval is how often to check for orphaned replication slots.
+const SlotCleanupInterval = 1 * time.Hour
+
 // Manager orchestrates cluster management for the local PostgreSQL instance.
 type Manager struct {
 	cfg           *config.Config
@@ -35,6 +38,7 @@ type Manager struct {
 	failover      *FailoverController
 	replication   *ReplicationManager
 	executor      CommandExecutor
+	connector     PGConnector
 	logger        *slog.Logger
 
 	mu    sync.RWMutex
@@ -48,6 +52,12 @@ type Manager struct {
 	raftErrorBackoff time.Duration
 	// lastRaftError is the time of the last Raft write error.
 	lastRaftError time.Time
+
+	// lastSlotCleanup tracks when we last cleaned up orphaned slots.
+	lastSlotCleanup time.Time
+
+	// quorumLostAt tracks when quorum was first lost (zero if we have quorum).
+	quorumLostAt time.Time
 }
 
 // NewManager creates a new cluster Manager.
@@ -66,6 +76,7 @@ func NewManager(
 		failover:      failover,
 		replication:   replication,
 		executor:      &realExecutor{},
+		connector:     &pgxConnector{},
 		logger:        logger.With("component", "cluster-manager"),
 		state:         StateInitializing,
 	}
@@ -88,6 +99,7 @@ func NewManagerWithExecutor(
 		failover:      failover,
 		replication:   replication,
 		executor:      executor,
+		connector:     &pgxConnector{},
 		logger:        logger.With("component", "cluster-manager"),
 		state:         StateInitializing,
 	}
@@ -234,6 +246,12 @@ func (m *Manager) evaluate(ctx context.Context) {
 	status := m.healthChecker.Status()
 	currentState := m.State()
 
+	// Update node health in FSM (including replication lag).
+	m.updateNodeHealthInFSM(status)
+
+	// Periodically clean up orphaned replication slots (primary only).
+	m.maybeCleanupOrphanedSlots(ctx)
+
 	switch currentState {
 	case StateInitializing:
 		if !status.Healthy {
@@ -255,7 +273,10 @@ func (m *Manager) evaluate(ctx context.Context) {
 			// We were primary but are now in recovery — demoted externally.
 			m.logger.Warn("primary detected in recovery mode, transitioning to replica")
 			m.setState(StateRunningReplica)
+			return
 		}
+		// Split-brain protection: self-fence if quorum is lost for too long.
+		m.checkQuorumAndSelfFence(ctx)
 
 	case StateRunningReplica:
 		if !status.Healthy {
@@ -479,6 +500,82 @@ func (m *Manager) executeDirective(ctx context.Context, d *consensus.Directive) 
 	}
 }
 
+// maybeCleanupOrphanedSlots checks if it's time to clean up orphaned replication slots
+// and does so if this node is the primary.
+func (m *Manager) maybeCleanupOrphanedSlots(ctx context.Context) {
+	// Only clean up on primary.
+	if m.State() != StateRunningPrimary {
+		return
+	}
+
+	// Check if enough time has passed since last cleanup.
+	m.mu.RLock()
+	lastCleanup := m.lastSlotCleanup
+	m.mu.RUnlock()
+
+	if time.Since(lastCleanup) < SlotCleanupInterval {
+		return
+	}
+
+	// Skip if replication manager not configured.
+	if m.replication == nil {
+		return
+	}
+
+	m.logger.Debug("checking for orphaned replication slots")
+
+	// Create a connection for cleanup.
+	cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	conn, err := m.connector.Connect(cleanupCtx, m.cfg.PostgreSQL.ConnectDSN)
+	if err != nil {
+		m.logger.Warn("failed to connect for slot cleanup", "error", err)
+		return
+	}
+	defer conn.Close(cleanupCtx)
+
+	if err := m.replication.CleanupOrphanedSlots(cleanupCtx, conn); err != nil {
+		m.logger.Warn("failed to cleanup orphaned slots", "error", err)
+		return
+	}
+
+	m.mu.Lock()
+	m.lastSlotCleanup = time.Now()
+	m.mu.Unlock()
+
+	m.logger.Debug("orphaned slot cleanup completed")
+}
+
+// updateNodeHealthInFSM updates this node's health data in the FSM for cluster-wide visibility.
+func (m *Manager) updateNodeHealthInFSM(status HealthStatus) {
+	if m.store == nil {
+		return
+	}
+
+	nodeInfo := consensus.NodeInfo{
+		Name:     m.cfg.Node.Name,
+		Host:     m.cfg.Node.Address,
+		Port:     m.cfg.PostgreSQL.Port,
+		State:    string(m.State()),
+		Lag:      status.ReplicationLag,
+		LastSeen: time.Now(),
+	}
+
+	if status.IsInRecovery {
+		nodeInfo.Role = "replica"
+	} else if status.Healthy {
+		nodeInfo.Role = "primary"
+	} else {
+		nodeInfo.Role = "unknown"
+	}
+
+	if err := m.store.UpdateNodeHealth(nodeInfo); err != nil {
+		// Don't log at warn level - this happens when not leader.
+		m.logger.Debug("failed to update node health in FSM", "error", err)
+	}
+}
+
 // checkPrimaryHealth checks whether the primary is healthy from the Raft leader's perspective.
 func (m *Manager) checkPrimaryHealth(ctx context.Context) {
 	if m.failover == nil {
@@ -551,6 +648,86 @@ func (m *Manager) ManualFailover(ctx context.Context, targetNode string) error {
 	}
 
 	return nil
+}
+
+// checkQuorumAndSelfFence checks if we've lost quorum and self-fences if protection is enabled.
+// This prevents split-brain scenarios where a partitioned primary continues accepting writes.
+func (m *Manager) checkQuorumAndSelfFence(ctx context.Context) {
+	// Skip if split-brain protection is disabled.
+	if !m.cfg.Failover.IsSplitBrainProtectionEnabled() {
+		return
+	}
+
+	// Skip if no store (can't check quorum).
+	if m.store == nil {
+		return
+	}
+
+	// Get quorum timeout, default to 30s if not configured.
+	quorumTimeout := m.cfg.Failover.QuorumLossTimeout
+	if quorumTimeout == 0 {
+		quorumTimeout = 30 * time.Second
+	}
+
+	// Check if we have quorum (heard from cluster recently).
+	hasQuorum := m.store.HasQuorum(quorumTimeout)
+
+	m.mu.Lock()
+	if hasQuorum {
+		// We have quorum, reset tracking.
+		if !m.quorumLostAt.IsZero() {
+			m.logger.Info("quorum restored")
+		}
+		m.quorumLostAt = time.Time{}
+		m.mu.Unlock()
+		return
+	}
+
+	// We don't have quorum.
+	if m.quorumLostAt.IsZero() {
+		// First detection of quorum loss.
+		m.quorumLostAt = time.Now()
+		m.mu.Unlock()
+		m.logger.Warn("quorum lost, will self-fence if not restored",
+			"timeout", quorumTimeout,
+		)
+		return
+	}
+
+	// Check if we've been without quorum long enough to self-fence.
+	lostDuration := time.Since(m.quorumLostAt)
+	m.mu.Unlock()
+
+	if lostDuration >= quorumTimeout {
+		m.logger.Error("quorum lost for too long, self-fencing to prevent split-brain",
+			"lost_duration", lostDuration,
+			"timeout", quorumTimeout,
+		)
+		m.selfFence(ctx)
+	} else {
+		m.logger.Warn("quorum still lost, self-fence pending",
+			"lost_duration", lostDuration,
+			"timeout", quorumTimeout,
+			"remaining", quorumTimeout-lostDuration,
+		)
+	}
+}
+
+// selfFence stops PostgreSQL to prevent this node from accepting writes during a partition.
+func (m *Manager) selfFence(ctx context.Context) {
+	m.setState(StateFenced)
+
+	pgCtl := filepath.Join(m.cfg.PostgreSQL.BinDir, "pg_ctl")
+	output, err := m.executor.Run(ctx, pgCtl, "stop", "-D", m.cfg.PostgreSQL.DataDir, "-m", "fast")
+	if err != nil {
+		m.logger.Error("self-fence pg_ctl stop failed",
+			"error", err,
+			"output", string(output),
+		)
+		return
+	}
+
+	m.logger.Info("self-fenced successfully, PostgreSQL stopped")
 }
 
 // ManualSwitchover triggers a graceful switchover to the specified target node.

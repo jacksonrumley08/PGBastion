@@ -38,7 +38,7 @@ func newTestSetup(nodeName string) *testSetup {
 
 	state := &mockClusterState{}
 	router := proxy.NewRouter(state, logger)
-	proxyInstance := proxy.NewProxy(15432, 15433, 30*time.Second, 5*time.Second, router, logger)
+	proxyInstance := proxy.NewProxy(15432, 15433, 30*time.Second, 5*time.Second, router, nil, logger)
 	vipManager := vip.NewManager("", "", nodeName, 10*time.Second, nil, logger)
 
 	h := &handlers{

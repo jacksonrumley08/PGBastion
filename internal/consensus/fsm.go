@@ -12,15 +12,17 @@ import (
 
 // Command types for the FSM.
 const (
-	CmdSetPrimary         = "SET_PRIMARY"
-	CmdSetReplica         = "SET_REPLICA"
-	CmdAddNode            = "ADD_NODE"
-	CmdRemoveNode         = "REMOVE_NODE"
-	CmdUpdateNodeHealth   = "UPDATE_NODE_HEALTH"
-	CmdSetClusterConfig   = "SET_CLUSTER_CONFIG"
-	CmdPublishDirective   = "PUBLISH_DIRECTIVE"
-	CmdCompleteDirective  = "COMPLETE_DIRECTIVE"
-	CmdCleanupDirectives  = "CLEANUP_DIRECTIVES"
+	CmdSetPrimary            = "SET_PRIMARY"
+	CmdSetReplica            = "SET_REPLICA"
+	CmdAddNode               = "ADD_NODE"
+	CmdRemoveNode            = "REMOVE_NODE"
+	CmdUpdateNodeHealth      = "UPDATE_NODE_HEALTH"
+	CmdSetClusterConfig      = "SET_CLUSTER_CONFIG"
+	CmdPublishDirective      = "PUBLISH_DIRECTIVE"
+	CmdCompleteDirective     = "COMPLETE_DIRECTIVE"
+	CmdCleanupDirectives     = "CLEANUP_DIRECTIVES"
+	CmdSetPostgreSQLConfig   = "SET_POSTGRESQL_CONFIG"
+	CmdPatchPostgreSQLConfig = "PATCH_POSTGRESQL_CONFIG"
 )
 
 // DirectiveMaxAge is the maximum age for completed/failed directives before cleanup.
@@ -78,12 +80,27 @@ type ClusterConfig struct {
 	SplitBrain bool `json:"split_brain"`
 }
 
+// PostgreSQLConfig holds cluster-wide PostgreSQL parameters stored in Raft.
+// These are applied to all nodes via ALTER SYSTEM.
+type PostgreSQLConfig struct {
+	// Parameters is a map of PostgreSQL parameter name to value.
+	// Values are strings that will be passed to ALTER SYSTEM SET.
+	Parameters map[string]string `json:"parameters"`
+	// Version is incremented on each update for change detection.
+	Version int64 `json:"version"`
+	// UpdatedAt is the timestamp of the last update.
+	UpdatedAt time.Time `json:"updated_at"`
+	// UpdatedBy is the node that made the last update.
+	UpdatedBy string `json:"updated_by,omitempty"`
+}
+
 // FSMState is the in-memory state managed by the FSM.
 type FSMState struct {
-	Nodes         map[string]*NodeInfo  `json:"nodes"`
-	PrimaryName   string                `json:"primary_name"`
-	ClusterConfig ClusterConfig         `json:"cluster_config"`
-	Directives    map[string]*Directive `json:"directives,omitempty"`
+	Nodes            map[string]*NodeInfo  `json:"nodes"`
+	PrimaryName      string                `json:"primary_name"`
+	ClusterConfig    ClusterConfig         `json:"cluster_config"`
+	PostgreSQLConfig PostgreSQLConfig      `json:"postgresql_config"`
+	Directives       map[string]*Directive `json:"directives,omitempty"`
 }
 
 // ClusterFSM implements raft.FSM for pgbastion's cluster state.
@@ -222,6 +239,40 @@ func (f *ClusterFSM) Apply(log *raft.Log) interface{} {
 			}
 		}
 		return cleaned
+
+	case CmdSetPostgreSQLConfig:
+		var pgCfg PostgreSQLConfig
+		if err := json.Unmarshal(cmd.Data, &pgCfg); err != nil {
+			return fmt.Errorf("unmarshal SET_POSTGRESQL_CONFIG data: %w", err)
+		}
+		// Replace entire config.
+		f.state.PostgreSQLConfig = pgCfg
+		return nil
+
+	case CmdPatchPostgreSQLConfig:
+		var patch struct {
+			Parameters map[string]string `json:"parameters"`
+			UpdatedBy  string            `json:"updated_by,omitempty"`
+		}
+		if err := json.Unmarshal(cmd.Data, &patch); err != nil {
+			return fmt.Errorf("unmarshal PATCH_POSTGRESQL_CONFIG data: %w", err)
+		}
+		// Merge parameters into existing config.
+		if f.state.PostgreSQLConfig.Parameters == nil {
+			f.state.PostgreSQLConfig.Parameters = make(map[string]string)
+		}
+		for k, v := range patch.Parameters {
+			if v == "" {
+				// Empty value means delete the parameter.
+				delete(f.state.PostgreSQLConfig.Parameters, k)
+			} else {
+				f.state.PostgreSQLConfig.Parameters[k] = v
+			}
+		}
+		f.state.PostgreSQLConfig.Version++
+		f.state.PostgreSQLConfig.UpdatedAt = time.Now()
+		f.state.PostgreSQLConfig.UpdatedBy = patch.UpdatedBy
+		return nil
 
 	default:
 		return fmt.Errorf("unknown command type: %s", cmd.Type)
@@ -382,4 +433,28 @@ func (f *ClusterFSM) DirectiveCount() int {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	return len(f.state.Directives)
+}
+
+// GetPostgreSQLConfig returns a copy of the current PostgreSQL configuration.
+func (f *ClusterFSM) GetPostgreSQLConfig() PostgreSQLConfig {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	// Deep copy parameters map.
+	params := make(map[string]string, len(f.state.PostgreSQLConfig.Parameters))
+	for k, v := range f.state.PostgreSQLConfig.Parameters {
+		params[k] = v
+	}
+	return PostgreSQLConfig{
+		Parameters: params,
+		Version:    f.state.PostgreSQLConfig.Version,
+		UpdatedAt:  f.state.PostgreSQLConfig.UpdatedAt,
+		UpdatedBy:  f.state.PostgreSQLConfig.UpdatedBy,
+	}
+}
+
+// GetPostgreSQLConfigVersion returns the current PostgreSQL config version.
+func (f *ClusterFSM) GetPostgreSQLConfigVersion() int64 {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.state.PostgreSQLConfig.Version
 }

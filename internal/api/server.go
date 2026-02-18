@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -131,7 +132,7 @@ func requiresAuth(method, path string) bool {
 		return false
 	}
 
-	// POST endpoints that mutate state require auth.
+	// POST/PATCH/DELETE endpoints that mutate state require auth.
 	protectedPaths := []string{
 		"/raft/add-peer",
 		"/raft/remove-peer",
@@ -140,6 +141,7 @@ func requiresAuth(method, path string) bool {
 		"/cluster/reinitialize",
 		"/cluster/pause",
 		"/cluster/resume",
+		"/cluster/postgresql",
 	}
 
 	for _, p := range protectedPaths {
@@ -183,6 +185,7 @@ func NewServer(
 	healthChecker *cluster.HealthChecker,
 	replication *cluster.ReplicationManager,
 	progressTracker *cluster.ProgressTracker,
+	configApplier *cluster.ConfigApplier,
 	logger *slog.Logger,
 ) *Server {
 	h := &handlers{
@@ -194,6 +197,7 @@ func NewServer(
 		healthChecker:   healthChecker,
 		replication:     replication,
 		progressTracker: progressTracker,
+		configApplier:   configApplier,
 		nodeName:        nodeName,
 	}
 
@@ -223,6 +227,17 @@ func NewServer(
 	apiMux.HandleFunc("/cluster/resume", methodGuard(http.MethodPost, h.clusterResume))
 	apiMux.HandleFunc("/cluster/progress", methodGuard(http.MethodGet, h.clusterProgress))
 
+	// Convenience aliases for operational endpoints.
+	apiMux.HandleFunc("/directives", methodGuard(http.MethodGet, h.raftDirectives))
+	apiMux.HandleFunc("/members", methodGuard(http.MethodGet, h.raftPeers))
+	apiMux.HandleFunc("/nodes", methodGuard(http.MethodGet, h.nodes))
+
+	// PostgreSQL configuration endpoints.
+	apiMux.HandleFunc("/cluster/postgresql", h.postgresqlConfigRouter)
+
+	// Server-Sent Events for real-time updates.
+	apiMux.HandleFunc("/events", h.events)
+
 	// Patroni-compatible endpoints for migration/tool compatibility.
 	apiMux.HandleFunc("/patroni", methodGuard(http.MethodGet, h.patroniPatroni))
 	apiMux.HandleFunc("/patroni/", methodGuard(http.MethodGet, h.patroniRoot)) // Catch-all
@@ -234,6 +249,12 @@ func NewServer(
 	apiMux.HandleFunc("/leader", methodGuard(http.MethodGet, h.patroniLeader))
 	apiMux.HandleFunc("/config", methodGuard(http.MethodGet, h.patroniConfig))
 	apiMux.HandleFunc("/history", methodGuard(http.MethodGet, h.patroniHistory))
+
+	// Web UI dashboard (embedded static files).
+	uiSubFS, err := fs.Sub(uiFS, "ui")
+	if err == nil {
+		apiMux.Handle("/ui/", http.StripPrefix("/ui/", http.FileServer(http.FS(uiSubFS))))
+	}
 
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.Handler())
