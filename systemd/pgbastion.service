@@ -1,0 +1,33 @@
+[Unit]
+Description=PGBastion - Unified PostgreSQL High-Availability Daemon
+Documentation=https://github.com/jrumley/pgbastion
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=pgbastion
+Group=pgbastion
+ExecStart=/usr/local/bin/pgbastion start --config /etc/pgbastion/pgbastion.yaml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+# Graceful shutdown: send SIGTERM, wait 60s for drain, then SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# Required for VIP management (netlink, gratuitous ARP).
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/pgbastion
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

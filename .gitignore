@@ -1,0 +1,36 @@
+# Binaries
+pgbastion
+pgbastion-*
+*.exe
+
+# Test artifacts
+/tmp/
+*.test
+coverage.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+/dist/
+/vendor/
+
+# Raft data (test)
+/test/e2e/raft-data/
+/tmp/pgbastion-*/
+
+# Secrets (never commit)
+*.pem
+*.key
+.env
+.env.*
+.claude/

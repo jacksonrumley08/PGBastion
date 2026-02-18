@@ -1,0 +1,73 @@
+# pgbastion — Unified PostgreSQL High-Availability Daemon
+# Configuration Reference
+#
+# pgbastion is a standalone PostgreSQL HA solution that replaces:
+# - HAProxy (TCP proxy)
+# - Keepalived (VIP management)
+# - etcd (consensus)
+# - Patroni (cluster management)
+#
+# All functionality is built-in using Raft consensus.
+
+node:
+  name: "node1"
+  address: "10.0.1.1"
+
+cluster:
+  peers:
+    - "10.0.1.2"
+    - "10.0.1.3"
+
+# Raft consensus layer (required).
+# Provides distributed consensus for cluster state and VIP leadership.
+raft:
+  data_dir: "/var/lib/pgbastion/raft"
+  bind_port: 8300      # default: 8300
+  bootstrap: true      # set true on first node only, false on others
+
+# Memberlist gossip for peer discovery.
+# New nodes join memberlist first, then get added to Raft via POST /raft/add-peer.
+memberlist:
+  bind_port: 7946      # default: 7946
+
+proxy:
+  primary_port: 5432
+  replica_port: 5433
+  drain_timeout: 30s
+  connect_timeout: 5s
+
+# VIP configuration (optional).
+# When set, the Raft leader assigns this VIP to its network interface.
+vip:
+  address: "10.0.1.100"
+  interface: "eth0"
+  renew_interval: 3s
+
+# PostgreSQL cluster management (optional).
+# When postgresql.data_dir is set, pgbastion manages PostgreSQL directly.
+# postgresql:
+#   bin_dir: "/usr/lib/postgresql/16/bin"
+#   data_dir: "/var/lib/postgresql/16/main"
+#   port: 5432
+#   superuser: "postgres"
+#   replication_user: "replicator"
+#   connect_dsn: "postgres://postgres@localhost:5432/postgres?sslmode=disable"
+#   health_timeout: 5s
+
+# Failover behavior configuration.
+# failover:
+#   confirmation_period: 5s    # Wait this long before confirming primary failure
+#   max_lag_threshold: 0       # Max replication lag in bytes (0 = unlimited)
+#   fencing_enabled: true      # Stop failed primary via pg_ctl before promoting
+
+api:
+  port: 8080
+  shutdown_timeout: 5s
+  # tls_cert: "/path/to/cert.pem"  # Optional TLS
+  # tls_key: "/path/to/key.pem"
+
+metrics:
+  port: 9090
+
+log:
+  level: "info"   # debug, info, warn, error
