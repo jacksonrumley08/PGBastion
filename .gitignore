@@ -1,6 +1,6 @@
 # Binaries
-pgbastion
-pgbastion-*
+/pgbastion
+/pgbastion-*
 *.exe
 
 # Test artifacts
