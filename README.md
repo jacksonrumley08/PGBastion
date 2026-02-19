@@ -9,7 +9,7 @@ Each node runs an identical `pgbastion` binary handling four responsibilities:
 | Component | Replaces | Implementation |
 |---|---|---|
 | TCP Proxy | HAProxy | Go `net` package, goroutine-per-connection |
-| VIP Manager | Keepalived | `vishvananda/netlink`, gratuitous ARP |
+| VIP Manager | Keepalived | `vishvananda/netlink`, gratuitous ARP (Linux only) |
 | Consensus | etcd | `hashicorp/raft` embedded consensus |
 | Cluster Manager | Patroni | `jackc/pgx`, `pg_ctl` |
 
@@ -238,10 +238,29 @@ pgbastion/
 
 ## Requirements
 
-- Go 1.21+
-- Linux (for VIP management via netlink)
-- `CAP_NET_ADMIN` and `CAP_NET_RAW` capabilities (for VIP)
+- Go 1.22+
+- Linux, Windows, or macOS
+  - **Linux:** Full functionality including VIP management via netlink
+  - **Windows/macOS:** All features except VIP management (use load balancer instead)
+- `CAP_NET_ADMIN` and `CAP_NET_RAW` capabilities (Linux only, for VIP)
 - PostgreSQL 14+ (for cluster management features)
+
+## Installation
+
+See **[INSTALL.md](INSTALL.md)** for detailed step-by-step installation guides:
+
+- [RHEL/CentOS/Rocky Linux](INSTALL.md#rhelcentosrockyalma-linux-8-or-9)
+- [Debian/Ubuntu](INSTALL.md#debianubuntu)
+- [Windows](INSTALL.md#windows-installation)
+
+## Operations
+
+See **[OPERATIONS.md](OPERATIONS.md)** for:
+
+- Backup and restore procedures
+- Rolling upgrades
+- Monitoring and alerting
+- Disaster recovery
 
 ## License
 
