@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrumley/pgbastion/internal/consensus"
+	"github.com/jacksonrumley08/pgbastion/internal/consensus"
 )
 
 type mockExecutor struct {

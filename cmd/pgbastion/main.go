@@ -15,13 +15,13 @@ import (
 	"github.com/hashicorp/memberlist"
 	"github.com/spf13/cobra"
 
-	"github.com/jrumley/pgbastion/internal/api"
-	"github.com/jrumley/pgbastion/internal/cluster"
-	"github.com/jrumley/pgbastion/internal/config"
-	"github.com/jrumley/pgbastion/internal/consensus"
-	"github.com/jrumley/pgbastion/internal/proxy"
-	"github.com/jrumley/pgbastion/internal/tracing"
-	"github.com/jrumley/pgbastion/internal/vip"
+	"github.com/jacksonrumley08/pgbastion/internal/api"
+	"github.com/jacksonrumley08/pgbastion/internal/cluster"
+	"github.com/jacksonrumley08/pgbastion/internal/config"
+	"github.com/jacksonrumley08/pgbastion/internal/consensus"
+	"github.com/jacksonrumley08/pgbastion/internal/proxy"
+	"github.com/jacksonrumley08/pgbastion/internal/tracing"
+	"github.com/jacksonrumley08/pgbastion/internal/vip"
 )
 
 var (

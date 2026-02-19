@@ -1,6 +1,6 @@
 [Unit]
 Description=PGBastion - Unified PostgreSQL High-Availability Daemon
-Documentation=https://github.com/jrumley/pgbastion
+Documentation=https://github.com/jacksonrumley08/pgbastion
 After=network-online.target postgresql.service
 Wants=network-online.target
 Requires=postgresql.service

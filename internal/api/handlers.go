@@ -13,10 +13,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
-	"github.com/jrumley/pgbastion/internal/cluster"
-	"github.com/jrumley/pgbastion/internal/consensus"
-	"github.com/jrumley/pgbastion/internal/proxy"
-	"github.com/jrumley/pgbastion/internal/vip"
+	"github.com/jacksonrumley08/pgbastion/internal/cluster"
+	"github.com/jacksonrumley08/pgbastion/internal/consensus"
+	"github.com/jacksonrumley08/pgbastion/internal/proxy"
+	"github.com/jacksonrumley08/pgbastion/internal/vip"
 )
 
 var (

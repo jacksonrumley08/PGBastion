@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrumley/pgbastion/internal/config"
+	"github.com/jacksonrumley08/pgbastion/internal/config"
 )
 
 func testLogger() *slog.Logger {

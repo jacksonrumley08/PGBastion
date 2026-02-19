@@ -11,8 +11,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
-	"github.com/jrumley/pgbastion/internal/config"
-	"github.com/jrumley/pgbastion/internal/consensus"
+	"github.com/jacksonrumley08/pgbastion/internal/config"
+	"github.com/jacksonrumley08/pgbastion/internal/consensus"
 )
 
 var (

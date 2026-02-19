@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrumley/pgbastion/internal/config"
-	"github.com/jrumley/pgbastion/internal/consensus"
+	"github.com/jacksonrumley08/pgbastion/internal/config"
+	"github.com/jacksonrumley08/pgbastion/internal/consensus"
 )
 
 // NodeState represents the state of this node in the cluster state machine.

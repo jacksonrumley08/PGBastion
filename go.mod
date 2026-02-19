@@ -1,6 +1,6 @@
-module github.com/jrumley/pgbastion
+module github.com/jacksonrumley08/pgbastion
 
-go 1.24.0
+go 1.22.0
 
 require (
 	github.com/hashicorp/memberlist v0.5.1

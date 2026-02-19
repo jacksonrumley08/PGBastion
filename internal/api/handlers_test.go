@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrumley/pgbastion/internal/proxy"
-	"github.com/jrumley/pgbastion/internal/vip"
+	"github.com/jacksonrumley08/pgbastion/internal/proxy"
+	"github.com/jacksonrumley08/pgbastion/internal/vip"
 )
 
 func testLogger() *slog.Logger {

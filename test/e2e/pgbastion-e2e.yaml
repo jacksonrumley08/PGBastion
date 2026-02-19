@@ -1,0 +1,34 @@
+# pgbastion config for e2e testing against the docker-compose PostgreSQL cluster.
+# Runs a single-node Raft cluster for testing.
+
+version: 1
+
+node:
+  name: "e2e-node"
+  address: "127.0.0.1"
+
+raft:
+  data_dir: "/tmp/pgbastion-e2e-raft"
+  bind_port: 18300
+  bootstrap: true
+
+memberlist:
+  bind_port: 17946
+
+proxy:
+  primary_port: 16432
+  replica_port: 16433
+  drain_timeout: 5s
+  connect_timeout: 3s
+
+api:
+  port: 18080
+  bind_address: "127.0.0.1"
+  auth_token: "e2e-test-token-12345"
+  shutdown_timeout: 5s
+
+metrics:
+  port: 19090
+
+log:
+  level: "debug"

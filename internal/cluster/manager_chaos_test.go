@@ -9,9 +9,9 @@ import (
 
 	"github.com/hashicorp/raft"
 
-	"github.com/jrumley/pgbastion/internal/config"
-	"github.com/jrumley/pgbastion/internal/consensus"
-	"github.com/jrumley/pgbastion/internal/testutil"
+	"github.com/jacksonrumley08/pgbastion/internal/config"
+	"github.com/jacksonrumley08/pgbastion/internal/consensus"
+	"github.com/jacksonrumley08/pgbastion/internal/testutil"
 )
 
 // mockStore implements a minimal Store interface for chaos testing.

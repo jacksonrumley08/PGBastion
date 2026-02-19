@@ -8,7 +8,7 @@ import (
 
 	"github.com/hashicorp/raft"
 
-	"github.com/jrumley/pgbastion/internal/proxy"
+	"github.com/jacksonrumley08/pgbastion/internal/proxy"
 )
 
 // ErrNotLeader is returned when a write is attempted on a non-leader node.

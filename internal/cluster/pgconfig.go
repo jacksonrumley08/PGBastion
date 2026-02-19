@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrumley/pgbastion/internal/consensus"
+	"github.com/jacksonrumley08/pgbastion/internal/consensus"
 )
 
 // ParameterContext indicates when a parameter change takes effect.

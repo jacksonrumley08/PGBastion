@@ -10,8 +10,8 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/jrumley/pgbastion/internal/config"
-	"github.com/jrumley/pgbastion/internal/consensus"
+	"github.com/jacksonrumley08/pgbastion/internal/config"
+	"github.com/jacksonrumley08/pgbastion/internal/consensus"
 )
 
 // ReplicationManager handles replication slot management and config templating.
